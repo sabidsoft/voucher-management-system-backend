@@ -1,6 +1,9 @@
 -- CreateEnum
 CREATE TYPE "Role" AS ENUM ('ADMIN', 'OPERATOR');
 
+-- CreateEnum
+CREATE TYPE "Status" AS ENUM ('ACTIVE', 'INACTIVE');
+
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
@@ -8,7 +11,7 @@ CREATE TABLE "User" (
     "email" TEXT NOT NULL,
     "password" TEXT NOT NULL,
     "role" "Role" NOT NULL,
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "status" "Status" NOT NULL DEFAULT 'ACTIVE',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -19,6 +22,7 @@ CREATE TABLE "User" (
 CREATE TABLE "Session" (
     "id" TEXT NOT NULL,
     "refreshTokenHash" TEXT NOT NULL,
+    "previousHashes" JSONB,
     "deviceInfo" TEXT,
     "ipAddress" TEXT,
     "expiresAt" TIMESTAMP(3) NOT NULL,

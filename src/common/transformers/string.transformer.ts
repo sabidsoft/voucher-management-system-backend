@@ -7,3 +7,7 @@ export const trim = ({ value }: TransformFnParams): any => {
 export const trimAndToLowerCase = ({ value }: TransformFnParams): any => {
   return typeof value === 'string' ? value.trim().toLowerCase() : value;
 };
+
+export const trimAndToUpperCase = ({ value }: TransformFnParams): any => {
+  return typeof value === 'string' ? value.trim().toUpperCase() : value;
+};

@@ -1,13 +1,12 @@
-
 import type { Request } from 'express';
-import { Role } from 'src/generated/prisma/enums';
+import { Role, Status } from 'src/generated/prisma/enums';
 
 export interface AuthUser {
   id: string;
   name: string;
   email: string;
   role: Role;
-  isActive: boolean;
+  status: Status;
 }
 
 export interface RefreshUser {

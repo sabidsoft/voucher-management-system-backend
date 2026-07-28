@@ -7,12 +7,10 @@ import { PassportModule } from '@nestjs/passport';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtModule } from '@nestjs/jwt';
 import { RefreshStrategy } from './strategies/refresh.strategy';
-import { PrismaModule } from 'src/prisma/prisma.module';
 
 @Module({
   imports: [
     UsersModule,
-    PrismaModule,
     PassportModule,
     JwtModule.register({}),
   ],

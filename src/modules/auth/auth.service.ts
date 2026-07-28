@@ -1,28 +1,23 @@
-import { ConflictException, ForbiddenException, Injectable, UnauthorizedException, } from '@nestjs/common';
+import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { hash, verify } from 'argon2';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../users/users.service';
-import { PrismaService } from 'src/prisma/prisma.service';
-import { CreateUserDto } from '../users/dto/create-user.dto';
+import { PrismaService } from 'src/infrastructure/prisma/prisma.service';
 import { AuthUser } from './types/auth.types';
 import { AccessTokenPayload, RefreshTokenPayload } from './types/token.types';
 import { createId } from '@paralleldrive/cuid2';
-import { Role } from 'src/generated/prisma/enums';
+import { Status } from 'src/generated/prisma/enums';
 import { Prisma } from 'src/generated/prisma/client';
+import { ErrorCode } from 'src/common/constants/error-codes';
 
-const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-// Grace period: a token that was rotated away from recently is still
-// accepted for this long, and up to this many recent generations are
-// remembered — tolerates a burst of rapid page reloads firing overlapping
-// /auth/refresh calls without treating any of them as theft.
-const REFRESH_GRACE_PERIOD_MS = 30000; // 30 seconds per entry
+const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const REFRESH_GRACE_PERIOD_MS = 30000;
 const REFRESH_HISTORY_MAX_ENTRIES = 10;
 
 interface PreviousHashEntry {
   hash: string;
-  expiresAt: string; // ISO string (Json fields can't store Date directly)
+  expiresAt: string;
 }
 
 @Injectable()
@@ -34,32 +29,12 @@ export class AuthService {
     private readonly prisma: PrismaService,
   ) { }
 
-  async register(createUserDto: CreateUserDto) {
-    if (createUserDto.role === Role.ADMIN)
-      throw new ForbiddenException('Admin accounts cannot be created through this endpoint');
-
-    const existingUser = await this.usersService.findByEmail(createUserDto.email);
-    if (existingUser) throw new ConflictException('Email already exists');
-
-    const hashedPassword = await hash(createUserDto.password);
-
-    const createdUser = await this.usersService.create({
-      ...createUserDto,
-      password: hashedPassword,
-    });
-
-    const { password: _, ...safeUser } = createdUser;
-    return safeUser;
-  }
-
   async login(user: AuthUser, ipAddress?: string, deviceInfo?: string) {
-    // Pre-generate a single unique ID to map both tokens and the DB record
     const sessionId = createId();
 
     const accessPayload: AccessTokenPayload = { sub: user.id, role: user.role, sessionId, type: 'access' };
     const refreshPayload: RefreshTokenPayload = { sub: user.id, sessionId, type: 'refresh' };
 
-    // Issue access and refresh tokens concurrently
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(accessPayload, {
         secret: this.config.getOrThrow('JWT_SECRET'),
@@ -73,7 +48,6 @@ export class AuthService {
 
     const refreshTokenHash = await hash(refreshToken);
 
-    // Persist session inside a single database round-trip
     await this.prisma.session.create({
       data: {
         id: sessionId,
@@ -93,26 +67,33 @@ export class AuthService {
       where: { id: sessionId },
     });
 
-    if (!session) throw new UnauthorizedException('Session not found');
-    if (session.userId !== userId) throw new UnauthorizedException('Invalid session');
+    if (!session)
+      throw new UnauthorizedException({
+        message: 'Session not found',
+        errorCode: ErrorCode.SESSION_NOT_FOUND,
+      });
+
+    if (session.userId !== userId)
+      throw new UnauthorizedException({
+        message: 'Invalid session',
+        errorCode: ErrorCode.INVALID_SESSION,
+      });
 
     if (session.expiresAt < new Date()) {
       await this.prisma.session.delete({ where: { id: sessionId } });
-      throw new UnauthorizedException('Session expired');
+      throw new UnauthorizedException({
+        message: 'Session expired',
+        errorCode: ErrorCode.SESSION_EXPIRED,
+      });
     }
 
     const now = new Date();
     const history = (session.previousHashes as unknown as PreviousHashEntry[] | null) ?? [];
-    // Drop expired entries up front — keeps the array from growing stale.
     const validHistory = history.filter((entry) => new Date(entry.expiresAt) > now);
 
     let isRefreshTokenMatched = await verify(session.refreshTokenHash, refreshToken);
 
     if (!isRefreshTokenMatched) {
-      // Doesn't match the CURRENT hash — check whether it matches any
-      // recent-enough previous generation before treating this as theft.
-      // This tolerates benign races (e.g. rapid page reloads firing
-      // overlapping /auth/refresh calls) without wiping every session.
       for (const entry of validHistory) {
         if (await verify(entry.hash, refreshToken)) {
           isRefreshTokenMatched = true;
@@ -121,18 +102,27 @@ export class AuthService {
       }
 
       if (!isRefreshTokenMatched) {
-        // Doesn't match the current hash OR any recent history entry —
-        // this is a genuinely stale/foreign token. Reuse of an
-        // already-rotated token signals possible theft, so every
-        // active session for this user is revoked, not just this one.
         await this.prisma.session.deleteMany({ where: { userId } });
-        throw new UnauthorizedException('Refresh token reuse detected');
+        throw new UnauthorizedException({
+          message: 'Refresh token reuse detected',
+          errorCode: ErrorCode.REFRESH_TOKEN_REUSE_DETECTED,
+        });
       }
     }
 
     const user = await this.usersService.findById(userId);
-    if (!user) throw new UnauthorizedException('User not found');
-    if (!user.isActive) throw new UnauthorizedException('Account is deactivated');
+    if (!user)
+      throw new UnauthorizedException({
+        message: 'User not found',
+        errorCode: ErrorCode.USER_NOT_FOUND,
+      });
+
+    if (user.status !== Status.ACTIVE)
+      throw new ForbiddenException({
+        message: `Your account is currently ${user.status?.toLowerCase()}`,
+        errorCode: ErrorCode.ACCOUNT_NOT_ACTIVE,
+        data: { status: user.status },
+      });
 
     const accessPayload: AccessTokenPayload = { sub: user.id, role: user.role, sessionId: session.id, type: 'access' };
     const refreshPayload: RefreshTokenPayload = { sub: user.id, sessionId: session.id, type: 'refresh' };
@@ -150,8 +140,6 @@ export class AuthService {
 
     const refreshTokenHash = await hash(newRefreshToken);
 
-    // Push the hash being rotated away from into history, cap the list
-    // size so it can't grow unbounded under a long burst of reloads.
     const newHistory: PreviousHashEntry[] = [
       ...validHistory,
       {
@@ -160,13 +148,6 @@ export class AuthService {
       },
     ].slice(-REFRESH_HISTORY_MAX_ENTRIES);
 
-    // Optimistic concurrency control: only update the session if the
-    // stored hash still matches the one we just verified. Prevents
-    // concurrent refresh calls (e.g. network retries) from silently
-    // overwriting each other's token. If lost, the caller (an in-flight
-    // request from an already-reloaded-away page) is simply told to
-    // retry — harmless, since only the page the user is actually
-    // looking at needs its own refresh call to succeed.
     const updateResult = await this.prisma.session.updateMany({
       where: {
         id: sessionId,
@@ -180,9 +161,10 @@ export class AuthService {
     });
 
     if (updateResult.count === 0) {
-      throw new UnauthorizedException(
-        'Session was refreshed concurrently, please try again',
-      );
+      throw new UnauthorizedException({
+        message: 'Session was refreshed concurrently, please try again',
+        errorCode: ErrorCode.SESSION_REFRESH_CONFLICT,
+      });
     }
 
     return {
@@ -193,7 +175,7 @@ export class AuthService {
         name: user.name,
         email: user.email,
         role: user.role,
-        isActive: user.isActive,
+        status: user.status,
       },
     };
   }
@@ -204,15 +186,15 @@ export class AuthService {
         where: { id: sessionId, userId },
       });
     } catch {
-      throw new UnauthorizedException('Session not found or already deleted');
+      throw new UnauthorizedException({
+        message: 'Session not found or already deleted',
+        errorCode: ErrorCode.SESSION_NOT_FOUND,
+      });
     }
   }
 
   async logoutAll(userId: string) {
-    // Idempotent operation: wipes all sessions and always returns success state safely
-    await this.prisma.session.deleteMany({
-      where: { userId },
-    });
+    await this.prisma.session.deleteMany({ where: { userId } });
   }
 
   async getActiveSessions(userId: string) {

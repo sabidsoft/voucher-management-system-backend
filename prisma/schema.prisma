@@ -13,16 +13,27 @@ enum Role {
   OPERATOR
 }
 
+enum Status {
+  ACTIVE
+  INACTIVE
+}
+
+enum VoucherType {
+  INC
+  EXP
+}
+
 model User {
   id        String    @id @default(cuid())
   name      String
   email     String    @unique
   password  String
-  role      Role      @default(OPERATOR)
+  role      Role      
+  status    Status    @default(ACTIVE)
 
-  isActive  Boolean   @default(true)
-
-  sessions  Session[]
+  sessions        Session[]
+  incomeVouchers  IncomeVoucher[]
+  expenseVouchers ExpenseVoucher[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -30,21 +41,10 @@ model User {
 
 model Session {
   id               String   @id @default(cuid())
-
   refreshTokenHash String   @unique
-
-  // Recent-hash history for the grace-period pattern: when the refresh
-  // token rotates, the OLD hash is pushed here (with its own short
-  // expiry) instead of being discarded immediately. A burst of several
-  // near-simultaneous requests (e.g. mashing reload rapidly) can each
-  // still validate against a recent-enough entry here, instead of being
-  // treated as token theft and wiping every session for the user.
-  // Shape: [{ "hash": string, "expiresAt": ISO string }, ...]
   previousHashes   Json?
-
   deviceInfo       String?
   ipAddress        String?
-
   expiresAt        DateTime
 
   createdAt        DateTime @default(now())
@@ -54,4 +54,57 @@ model Session {
   user             User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model IncomeVoucher {
+  id             String   @id @default(cuid())
+  voucherNumber  String   @unique
+  date           DateTime @db.Date
+  amount         Decimal  @db.Decimal(18,2)
+  incomeSource   String
+  description    String
+  reference      String
+
+  createdById    String
+  createdBy      User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([date])
+  @@index([createdById])
+  @@index([createdById, date])
+}
+
+model ExpenseVoucher {
+  id             String   @id @default(cuid())
+  voucherNumber  String   @unique
+  date           DateTime @db.Date
+  amount         Decimal  @db.Decimal(18,2)
+  expenseHead    String
+  description    String
+  reference      String
+
+  createdById    String
+  createdBy      User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([date])
+  @@index([createdById])
+  @@index([createdById, date])
+}
+
+model VoucherSequence {
+  id             String      @id @default(cuid())
+
+  voucherType    VoucherType
+  year           Int
+  sequence       Int
+
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@unique([voucherType, year])
 }

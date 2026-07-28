@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { hash } from 'argon2';
 import { isEmail } from 'class-validator';
-import { PrismaClient, Role } from 'src/generated/prisma/client';
+import { PrismaClient, Role, Status } from 'src/generated/prisma/client';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -45,6 +45,7 @@ async function main() {
             name: adminName,
             email: adminEmail,
             password: hashedPassword,
+            status: Status.ACTIVE,
             role: Role.ADMIN,
         },
     });

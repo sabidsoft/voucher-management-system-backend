@@ -1,33 +1,34 @@
-import { Body, Controller, Get, Post, Req, Res, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { LocalAuthGuard } from './guards/local-auth.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { ResponseMessage } from 'src/common/decorators/response-message.decorator';
-import { CreateUserDto } from '../users/dto/create-user.dto';
 import type {
   RequestWithAuthUser,
   RequestWithRefreshUser,
 } from './types/auth.types';
 import { RefreshAuthGuard } from './guards/refresh-auth.guard';
 import type { Response } from 'express';
-import { RolesGuard } from './guards/roles.guard';
-import { Roles } from './decorators/roles.decorator';
-import { Role } from 'src/generated/prisma/enums';
-import { COOKIE_OPTIONS, REFRESH_TOKEN_COOKIE } from './constants/auth.constants';
+import {
+  COOKIE_OPTIONS,
+  REFRESH_TOKEN_COOKIE,
+} from './constants/auth.constants';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) { }
-
-  @Post('register')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN)
-  @ResponseMessage('Operator created')
-  register(@Body() createUserDto: CreateUserDto) {
-    return this.authService.register(createUserDto);
-  }
+  constructor(private readonly authService: AuthService) {}
 
   @Post('login')
+  @HttpCode(HttpStatus.OK)
   @UseGuards(LocalAuthGuard)
   @ResponseMessage('Login successful')
   async login(
@@ -56,7 +57,9 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @HttpCode(HttpStatus.OK)
   @UseGuards(RefreshAuthGuard)
+  @ResponseMessage('Token refreshed successfully')
   async refresh(
     @Req() req: RequestWithRefreshUser,
     @Res({ passthrough: true }) res: Response,
@@ -84,6 +87,7 @@ export class AuthController {
   }
 
   @Post('logout')
+  @HttpCode(HttpStatus.OK)
   @UseGuards(RefreshAuthGuard)
   @ResponseMessage('Logout successful')
   async logout(
@@ -101,6 +105,7 @@ export class AuthController {
   }
 
   @Post('logout-all')
+  @HttpCode(HttpStatus.OK)
   @UseGuards(RefreshAuthGuard)
   @ResponseMessage('Logged out from all devices')
   async logoutAll(
@@ -116,28 +121,8 @@ export class AuthController {
 
   @Get('devices')
   @UseGuards(JwtAuthGuard)
-  async getMyDevices(@Req() req: RequestWithAuthUser) {
+  @ResponseMessage('Devices fetched successfully')
+  getMyDevices(@Req() req: RequestWithAuthUser) {
     return this.authService.getActiveSessions(req.user.id);
-  }
-
-  @Get('protected')
-  @UseGuards(JwtAuthGuard)
-  @ResponseMessage('Protected route accessed')
-  getProtected() {
-    return { status: 'ok' };
-  }
-
-  @Get('admin')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN)
-  getAdminData() {
-    return 'Admin only';
-  }
-
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN, Role.OPERATOR)
-  @Get('manage-orders')
-  manageOrders() {
-    return 'Admin and Operator';
   }
 }

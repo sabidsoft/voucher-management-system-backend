@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { GetUsersDto } from './dto/get-users.dto';
 import { ResponseMessage } from 'src/common/decorators/response-message.decorator';
@@ -10,6 +10,9 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { UpdateMyProfileDto } from './dto/update-my-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import type { RequestWithAuthUser } from '../auth/types/auth.types';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -35,6 +38,25 @@ export class UsersController {
   @ResponseMessage('User statistics fetched successfully')
   getStats() {
     return this.usersService.getStats();
+  }
+
+  // ---- Self-service — must come BEFORE @Get(':id')/@Patch(':id'),
+  // otherwise "me" gets captured as the :id param and these routes
+  // become unreachable (same issue we hit with voucher 'stats'/
+  // 'summary-pdf' routes). No @Roles() here deliberately — every
+  // authenticated user (ADMIN or OPERATOR) manages their own profile;
+  // RolesGuard allows access when no roles are specified. ----
+
+  @Patch('me')
+  @ResponseMessage('Profile updated successfully')
+  updateMyProfile(@Body() dto: UpdateMyProfileDto, @Req() req: RequestWithAuthUser) {
+    return this.usersService.updateMyProfile(req.user.id, dto);
+  }
+
+  @Patch('me/password')
+  @ResponseMessage('Password changed successfully')
+  changePassword(@Body() dto: ChangePasswordDto, @Req() req: RequestWithAuthUser) {
+    return this.usersService.changePassword(req.user.id, dto);
   }
 
   @Get(':id')

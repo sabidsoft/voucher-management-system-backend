@@ -7,6 +7,9 @@ export interface AuthUser {
   email: string;
   role: Role;
   status: Status;
+  lastLoginAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface RefreshUser {

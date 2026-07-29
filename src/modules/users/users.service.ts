@@ -1,12 +1,14 @@
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { GetUsersDto } from './dto/get-users.dto';
 import { Prisma } from 'src/generated/prisma/client';
 import { Role, Status } from 'src/generated/prisma/enums';
-import { hash } from 'argon2';
+import { hash, verify } from 'argon2';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { UpdateMyProfileDto } from './dto/update-my-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { ErrorCode } from 'src/common/constants/error-codes';
 import { PrismaService } from 'src/infrastructure/prisma/prisma.service';
 
@@ -18,6 +20,7 @@ const userSelect = {
   status: true,
   createdAt: true,
   updatedAt: true,
+  lastLoginAt: true,
 } satisfies Prisma.UserSelect;
 
 @Injectable()
@@ -187,6 +190,57 @@ export class UsersService {
         data: { password: hashedPassword },
       }),
       this.prisma.session.deleteMany({ where: { userId: id } }),
+    ]);
+
+    return null;
+  }
+
+  // ---- Self-service (any authenticated user, acting on their own
+  // account — see UsersController for the "me"/"me/password" routes) ----
+
+  async updateMyProfile(userId: string, dto: UpdateMyProfileDto) {
+    const updatedUser = await this.prisma.user.update({
+      where: { id: userId },
+      data: { name: dto.name },
+      select: userSelect,
+    });
+
+    return { user: updatedUser };
+  }
+
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    // findById (not findOneById) — we need the raw `password` hash for
+    // verification, which the sanitized userSelect deliberately omits.
+    const user = await this.findById(userId);
+
+    if (!user) {
+      throw new NotFoundException({
+        message: 'User not found',
+        errorCode: ErrorCode.USER_NOT_FOUND,
+      });
+    }
+
+    const isCurrentPasswordValid = await verify(user.password, dto.currentPassword);
+
+    if (!isCurrentPasswordValid) {
+      throw new BadRequestException({
+        message: 'Current password is incorrect',
+        errorCode: ErrorCode.INVALID_CURRENT_PASSWORD,
+      });
+    }
+
+    const hashedPassword = await hash(dto.newPassword);
+
+    // Same defense-in-depth pattern as the admin-driven resetPassword()
+    // above: invalidate every session after a password change, so any
+    // device/browser holding a refresh token issued under the OLD
+    // password is forced to log in again with the new one.
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { password: hashedPassword },
+      }),
+      this.prisma.session.deleteMany({ where: { userId } }),
     ]);
 
     return null;

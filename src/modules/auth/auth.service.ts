@@ -47,19 +47,30 @@ export class AuthService {
     ]);
 
     const refreshTokenHash = await hash(refreshToken);
+    const loginTime = new Date();
 
-    await this.prisma.session.create({
-      data: {
-        id: sessionId,
-        userId: user.id,
-        refreshTokenHash,
-        ipAddress,
-        deviceInfo,
-        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
-      },
-    });
+    await Promise.all([
+      this.prisma.session.create({
+        data: {
+          id: sessionId,
+          userId: user.id,
+          refreshTokenHash,
+          ipAddress,
+          deviceInfo,
+          expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+        },
+      }),
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: loginTime },
+      }),
+    ]);
 
-    return { user, accessToken, refreshToken };
+    // `user` here still carries the OLD lastLoginAt (read by
+    // LocalStrategy before this update ran) — override it with the
+    // fresh timestamp we just wrote, so the response reflects this
+    // login's actual moment rather than the previous one.
+    return { user: { ...user, lastLoginAt: loginTime }, accessToken, refreshToken };
   }
 
   async refresh(userId: string, sessionId: string, refreshToken: string) {
@@ -176,6 +187,9 @@ export class AuthService {
         email: user.email,
         role: user.role,
         status: user.status,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        lastLoginAt: user.lastLoginAt,
       },
     };
   }

@@ -52,9 +52,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
         const typedResponse = exceptionResponse as ExceptionResponse;
 
         exceptionMessage =
-          typedResponse.message ??
-          typedResponse.error ??
-          'Error occurred';
+          typedResponse.message ?? typedResponse.error ?? 'Error occurred';
 
         // Carries through the stable code we attached when throwing
         // (e.g. { message: 'User not found', errorCode: 'USER_NOT_FOUND' }).
@@ -72,10 +70,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
       // Validation errors — class-validator hands us a string[] with no
       // errorCode of its own, so we assign one here.
-      if (
-        status === HttpStatus.BAD_REQUEST &&
-        Array.isArray(exceptionMessage)
-      ) {
+      if (status === HttpStatus.BAD_REQUEST && Array.isArray(exceptionMessage)) {
         message = 'Validation failed';
         errorCode = ErrorCode.VALIDATION_ERROR;
       } else {
@@ -87,6 +82,13 @@ export class HttpExceptionFilter implements ExceptionFilter {
         // *something* stable to key off, even if not maximally specific.
         if (errorCode === ErrorCode.INTERNAL_ERROR) {
           errorCode = this.fallbackCodeForStatus(status);
+        }
+
+        // ThrottlerException's default message leaks the class name, so
+        // replace it with something the client can show directly.
+        if (status === HttpStatus.TOO_MANY_REQUESTS) {
+          message = 'Too many requests, please try again shortly';
+          errors = [message];
         }
       }
     }
@@ -145,7 +147,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
       this.logger.error({
         method: request.method,
         url: request.url,
-        message: exception instanceof Error ? exception.message : 'Unknown error',
+        message:
+          exception instanceof Error ? exception.message : 'Unknown error',
         stack: exception instanceof Error ? exception.stack : undefined,
       });
     }
@@ -172,11 +175,13 @@ export class HttpExceptionFilter implements ExceptionFilter {
       case HttpStatus.UNAUTHORIZED:
         return ErrorCode.INVALID_CREDENTIALS;
       case HttpStatus.FORBIDDEN:
-        return 'FORBIDDEN';
+        return ErrorCode.FORBIDDEN;
       case HttpStatus.NOT_FOUND:
         return ErrorCode.RECORD_NOT_FOUND;
       case HttpStatus.CONFLICT:
         return ErrorCode.DUPLICATE_ENTRY;
+      case HttpStatus.TOO_MANY_REQUESTS:
+        return ErrorCode.TOO_MANY_REQUESTS;
       default:
         return ErrorCode.INTERNAL_ERROR;
     }

@@ -9,7 +9,7 @@ export class AppController {
   getRoot() {
     return {
       name: 'My App',
-      version: '0.0.1',
+      version: '1.0.0',
     };
   }
 }

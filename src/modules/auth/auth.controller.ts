@@ -22,11 +22,13 @@ import {
   COOKIE_OPTIONS,
   REFRESH_TOKEN_COOKIE,
 } from './constants/auth.constants';
+import { Throttle } from '@nestjs/throttler';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @UseGuards(LocalAuthGuard)
@@ -56,6 +58,7 @@ export class AuthController {
     return { user, accessToken, refreshToken };
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @UseGuards(RefreshAuthGuard)

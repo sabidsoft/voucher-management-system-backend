@@ -33,7 +33,7 @@ export class IncomeVouchersController {
   @Roles(Role.ADMIN, Role.OPERATOR)
   @ResponseMessage('Income voucher created successfully')
   create(@Body() dto: CreateIncomeVoucherDto, @Req() req: RequestWithAuthUser) {
-    return this.incomeVouchersService.create(dto, req.user.id);
+    return this.incomeVouchersService.create(dto, req.user);
   }
 
   @Get()
@@ -43,8 +43,17 @@ export class IncomeVouchersController {
     return this.incomeVouchersService.findAll(query, req.user);
   }
 
-  // Must come BEFORE @Get(':id') — otherwise "stats" gets matched as
+  // Must come BEFORE @Get(':id') — same reasoning as 'stats'/'summary-pdf'
+  // below: a literal path segment has to be registered before a
+  // :id-catching route, otherwise "pending-count" gets swallowed as
   // the :id param and this route becomes unreachable.
+  @Get('pending-count')
+  @Roles(Role.ADMIN, Role.OPERATOR)
+  @ResponseMessage('Pending count fetched successfully')
+  getPendingCount(@Req() req: RequestWithAuthUser) {
+    return this.incomeVouchersService.getPendingCount(req.user);
+  }
+
   @Get('stats')
   @Roles(Role.ADMIN, Role.OPERATOR)
   @ResponseMessage('Income voucher statistics fetched successfully')
@@ -52,9 +61,6 @@ export class IncomeVouchersController {
     return this.incomeVouchersService.getStats(req.user);
   }
 
-  // Must come BEFORE @Get(':id') — otherwise "summary-pdf" gets matched
-  // as the :id param (findOne("summary-pdf")) and this route becomes
-  // unreachable. Same reasoning as 'stats' above.
   @Get('summary-pdf')
   @Roles(Role.ADMIN, Role.OPERATOR)
   async downloadSummaryPdf(
@@ -80,14 +86,6 @@ export class IncomeVouchersController {
     return this.incomeVouchersService.findOne(id, req.user);
   }
 
-  // Returns raw PDF bytes, not the usual { success, message, data }
-  // envelope — uses bare @Res() so this handler fully owns the
-  // response, bypassing the global ResponseInterceptor's JSON wrapping
-  // (which only applies to values returned normally from a handler).
-  //
-  // ?download=true sets Content-Disposition: attachment (forces a
-  // download); omitting it (or any other value) sets `inline`, letting
-  // the browser's built-in PDF viewer render it in a new tab instead.
   @Get(':id/pdf')
   @Roles(Role.ADMIN, Role.OPERATOR)
   async downloadPdf(
@@ -110,11 +108,33 @@ export class IncomeVouchersController {
     res.send(buffer);
   }
 
+  // Now reachable by OPERATOR too (previously ADMIN-only) — the
+  // service layer enforces ownership + "not-yet-APPROVED" for
+  // Operators, and resets status back to PENDING on their edits (see
+  // IncomeVouchersService.update's comment).
   @Patch(':id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.OPERATOR)
   @ResponseMessage('Income voucher updated successfully')
-  update(@Param('id') id: string, @Body() dto: UpdateIncomeVoucherDto) {
-    return this.incomeVouchersService.update(id, dto);
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateIncomeVoucherDto,
+    @Req() req: RequestWithAuthUser,
+  ) {
+    return this.incomeVouchersService.update(id, dto, req.user);
+  }
+
+  @Patch(':id/approve')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Income voucher approved successfully')
+  approve(@Param('id') id: string) {
+    return this.incomeVouchersService.approve(id);
+  }
+
+  @Patch(':id/reject')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Income voucher rejected successfully')
+  reject(@Param('id') id: string) {
+    return this.incomeVouchersService.reject(id);
   }
 
   @Delete(':id')

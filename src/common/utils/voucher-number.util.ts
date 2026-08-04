@@ -2,8 +2,8 @@ import { Prisma } from 'src/generated/prisma/client';
 import { VoucherType } from 'src/generated/prisma/enums';
 
 const VOUCHER_PREFIX: Record<VoucherType, string> = {
-  [VoucherType.INC]: 'INVO',
-  [VoucherType.EXP]: 'EXVO',
+  [VoucherType.INVO]: 'INVO',
+  [VoucherType.EXVO]: 'EXVO',
 };
 
 export async function generateVoucherNumber(

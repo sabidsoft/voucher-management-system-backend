@@ -19,8 +19,14 @@ enum Status {
 }
 
 enum VoucherType {
-  INC
-  EXP
+  INVO
+  EXVO
+}
+
+enum VoucherStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 model User {
@@ -65,6 +71,7 @@ model IncomeVoucher {
   incomeSource   String
   description    String
   reference      String
+  status         VoucherStatus @default(PENDING)
 
   createdById    String
   createdBy      User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
@@ -75,6 +82,7 @@ model IncomeVoucher {
   @@index([date])
   @@index([createdById])
   @@index([createdById, date])
+  @@index([status])
 }
 
 model ExpenseVoucher {
@@ -85,6 +93,7 @@ model ExpenseVoucher {
   expenseHead    String
   description    String
   reference      String
+  status         VoucherStatus @default(PENDING)
 
   createdById    String
   createdBy      User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
@@ -95,6 +104,7 @@ model ExpenseVoucher {
   @@index([date])
   @@index([createdById])
   @@index([createdById, date])
+  @@index([status])
 }
 
 model VoucherSequence {

@@ -33,7 +33,7 @@ export class ExpenseVouchersController {
   @Roles(Role.ADMIN, Role.OPERATOR)
   @ResponseMessage('Expense voucher created successfully')
   create(@Body() dto: CreateExpenseVoucherDto, @Req() req: RequestWithAuthUser) {
-    return this.expenseVouchersService.create(dto, req.user.id);
+    return this.expenseVouchersService.create(dto, req.user);
   }
 
   @Get()
@@ -43,8 +43,13 @@ export class ExpenseVouchersController {
     return this.expenseVouchersService.findAll(query, req.user);
   }
 
-  // Must come BEFORE @Get(':id') — otherwise "stats" gets matched as
-  // the :id param and this route becomes unreachable.
+  @Get('pending-count')
+  @Roles(Role.ADMIN, Role.OPERATOR)
+  @ResponseMessage('Pending count fetched successfully')
+  getPendingCount(@Req() req: RequestWithAuthUser) {
+    return this.expenseVouchersService.getPendingCount(req.user);
+  }
+
   @Get('stats')
   @Roles(Role.ADMIN, Role.OPERATOR)
   @ResponseMessage('Expense voucher statistics fetched successfully')
@@ -52,8 +57,6 @@ export class ExpenseVouchersController {
     return this.expenseVouchersService.getStats(req.user);
   }
 
-  // Also placed before @Get(':id') for the same reason as 'stats' —
-  // this exact bug bit the Income Voucher summary-pdf route earlier.
   @Get('summary-pdf')
   @Roles(Role.ADMIN, Role.OPERATOR)
   async downloadSummaryPdf(
@@ -79,9 +82,6 @@ export class ExpenseVouchersController {
     return this.expenseVouchersService.findOne(id, req.user);
   }
 
-  // Returns raw PDF bytes via bare @Res(), bypassing the global
-  // ResponseInterceptor's JSON envelope — same pattern as Income
-  // Voucher's PDF route.
   @Get(':id/pdf')
   @Roles(Role.ADMIN, Role.OPERATOR)
   async downloadPdf(
@@ -105,10 +105,28 @@ export class ExpenseVouchersController {
   }
 
   @Patch(':id')
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.OPERATOR)
   @ResponseMessage('Expense voucher updated successfully')
-  update(@Param('id') id: string, @Body() dto: UpdateExpenseVoucherDto) {
-    return this.expenseVouchersService.update(id, dto);
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateExpenseVoucherDto,
+    @Req() req: RequestWithAuthUser,
+  ) {
+    return this.expenseVouchersService.update(id, dto, req.user);
+  }
+
+  @Patch(':id/approve')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Expense voucher approved successfully')
+  approve(@Param('id') id: string) {
+    return this.expenseVouchersService.approve(id);
+  }
+
+  @Patch(':id/reject')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Expense voucher rejected successfully')
+  reject(@Param('id') id: string) {
+    return this.expenseVouchersService.reject(id);
   }
 
   @Delete(':id')

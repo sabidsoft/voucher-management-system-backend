@@ -1,11 +1,11 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from 'src/infrastructure/prisma/prisma.service';
 import { CreateIncomeVoucherDto } from './dto/create-income-voucher.dto';
 import { UpdateIncomeVoucherDto } from './dto/update-income-voucher.dto';
 import { GetIncomeVouchersDto } from './dto/get-income-vouchers.dto';
 import { GetIncomeVoucherSummaryDto } from './dto/get-income-voucher-summary.dto';
 import { Prisma } from 'src/generated/prisma/client';
-import { Role, VoucherType } from 'src/generated/prisma/enums';
+import { Role, VoucherType, VoucherStatus } from 'src/generated/prisma/enums';
 import { ErrorCode } from 'src/common/constants/error-codes';
 import { getDhakaTodayDateOnly } from 'src/common/utils/date-range.util';
 import { serializeAmount } from 'src/common/utils/serialize-decimal.util';
@@ -24,6 +24,7 @@ const incomeVoucherSelect = {
   incomeSource: true,
   description: true,
   reference: true,
+  status: true,
   createdAt: true,
   updatedAt: true,
   createdBy: {
@@ -44,20 +45,18 @@ export class IncomeVouchersService {
     private readonly pdfService: PdfService,
   ) {}
 
-  async create(dto: CreateIncomeVoucherDto, userId: string) {
+  async create(dto: CreateIncomeVoucherDto, requestingUser: RequestingUser) {
     assertVoucherDateNotFuture(dto.date);
 
-    // Since `date` is a @db.Date column (no time/timezone component),
-    // new Date(dto.date) maps unambiguously onto it — no Dhaka-offset
-    // math needed.
-    //
-    // The voucher's own effective date decides which year's sequence
-    // it belongs to — not today's date — so a backdated entry still
-    // lands in the correct year's numbering.
     const voucherDate = new Date(dto.date);
 
+    // Admins are trusted — their own vouchers skip the review queue.
+    // Anything an Operator creates needs Admin sign-off first.
+    const initialStatus =
+      requestingUser.role === Role.ADMIN ? VoucherStatus.APPROVED : VoucherStatus.PENDING;
+
     const voucher = await this.prisma.$transaction(async (tx) => {
-      const voucherNumber = await generateVoucherNumber(tx, voucherDate, VoucherType.INC);
+      const voucherNumber = await generateVoucherNumber(tx, voucherDate, VoucherType.INVO);
 
       return tx.incomeVoucher.create({
         data: {
@@ -67,7 +66,8 @@ export class IncomeVouchersService {
           incomeSource: dto.incomeSource,
           description: dto.description,
           reference: dto.reference,
-          createdById: userId,
+          status: initialStatus,
+          createdById: requestingUser.id,
         },
         select: incomeVoucherSelect,
       });
@@ -77,16 +77,18 @@ export class IncomeVouchersService {
   }
 
   async findAll(query: GetIncomeVouchersDto, requestingUser: RequestingUser) {
-    const { page, limit, search, dateFrom, dateTo, createdById } = query;
+    const { page, limit, search, dateFrom, dateTo, createdById, status } = query;
 
     const where: Prisma.IncomeVoucherWhereInput = {};
 
     if (requestingUser.role === Role.OPERATOR) {
-      // Operators can only ever see their own vouchers — enforced here
-      // regardless of any createdById the client attempts to send.
       where.createdById = requestingUser.id;
     } else if (createdById) {
       where.createdById = createdById;
+    }
+
+    if (status) {
+      where.status = status;
     }
 
     if (search) {
@@ -106,47 +108,57 @@ export class IncomeVouchersService {
 
     const skip = (page - 1) * limit;
 
-    const [vouchers, aggregateResult] = await this.prisma.$transaction([
+    // The "Total Amount" stat must always reflect only APPROVED money,
+    // regardless of whatever status the list itself is filtered to —
+    // a PENDING/REJECTED voucher isn't real income yet, and including
+    // it would overstate the office's actual finances. This is
+    // intentionally a SEPARATE aggregate from the list's own `where`
+    // (which respects the caller's status filter for what rows to
+    // show), scoped to the same search/date/ownership filters but with
+    // status forced to APPROVED.
+    const approvedAmountWhere: Prisma.IncomeVoucherWhereInput = { ...where, status: VoucherStatus.APPROVED };
+
+    const [vouchers, countResult, approvedSumResult] = await this.prisma.$transaction([
       this.prisma.incomeVoucher.findMany({
         where,
         skip,
         take: limit,
-        // Sorted by the voucher's own transaction date first — matches
-        // the page's date-centric mental model. voucherNumber is a
-        // secondary tie-breaker: without it, rows sharing the same
-        // `date` have no guaranteed stable order, which can cause a
-        // row to be skipped or duplicated across pages when paginating.
         orderBy: [{ date: 'desc' }, { voucherNumber: 'desc' }],
         select: incomeVoucherSelect,
       }),
-      // aggregate() gives us both the filtered count and the filtered
-      // sum(amount) in a single query — no extra round trip compared
-      // to the plain count() this replaces. totalAmount here reflects
-      // whatever the current search/date-filter/role-scope narrows
-      // down to, not the whole table — this feeds the page's own
-      // "Total Vouchers"/"Total Amount" stat cards, which are meant to
-      // be filter-aware (unlike the separate /stats endpoint, which
-      // stays global/unfiltered for the Dashboard and this page's
-      // "Today" cards).
+      this.prisma.incomeVoucher.count({ where }),
       this.prisma.incomeVoucher.aggregate({
-        where,
-        _count: true,
+        where: approvedAmountWhere,
         _sum: { amount: true },
       }),
     ]);
-
-    const total = aggregateResult._count;
 
     return {
       vouchers: vouchers.map((v) => serializeAmount(v)),
       meta: {
         page,
         limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        totalAmount: Number(aggregateResult._sum.amount ?? 0),
+        total: countResult,
+        totalPages: Math.ceil(countResult / limit),
+        totalAmount: Number(approvedSumResult._sum.amount ?? 0),
       },
     };
+  }
+
+  // Lightweight — used by the notification-bell's polling. Deliberately
+  // returns just a count, not the full pending list, so each poll stays
+  // cheap. The bell's dropdown calls findAll({ status: PENDING }) for
+  // the actual list only when opened.
+  async getPendingCount(requestingUser: RequestingUser) {
+    if (requestingUser.role !== Role.ADMIN) {
+      return { count: 0 };
+    }
+
+    const count = await this.prisma.incomeVoucher.count({
+      where: { status: VoucherStatus.PENDING },
+    });
+
+    return { count };
   }
 
   async findOne(id: string, requestingUser: RequestingUser) {
@@ -165,10 +177,30 @@ export class IncomeVouchersService {
     return { voucher: serializeAmount(voucher) };
   }
 
-  // ADMIN-only at the controller/guard level — no ownership check
-  // needed here since only admins can reach this method at all.
-  async update(id: string, dto: UpdateIncomeVoucherDto) {
-    await this.findVoucherOrThrow(id);
+  // Both ADMIN and OPERATOR can reach this now (see controller) — but
+  // an Operator may only edit their OWN voucher, and only while it's
+  // not yet APPROVED (an approved voucher is a finalized financial
+  // record). Any edit by an Operator resets status back to PENDING —
+  // even if it was already PENDING — since the figures just changed
+  // and need a fresh review; this is also how a REJECTED voucher gets
+  // resubmitted. Admin edits are trusted and don't force re-review.
+  async update(id: string, dto: UpdateIncomeVoucherDto, requestingUser: RequestingUser) {
+    const existing = await this.findVoucherOrThrow(id);
+
+    if (requestingUser.role === Role.OPERATOR) {
+      if (existing.createdBy.id !== requestingUser.id) {
+        throw new ForbiddenException({
+          message: 'You do not have access to this voucher',
+          errorCode: ErrorCode.FORBIDDEN,
+        });
+      }
+      if (existing.status === VoucherStatus.APPROVED) {
+        throw new ForbiddenException({
+          message: 'An approved voucher cannot be edited',
+          errorCode: ErrorCode.VOUCHER_LOCKED,
+        });
+      }
+    }
 
     if (dto.date !== undefined) {
       assertVoucherDateNotFuture(dto.date);
@@ -182,7 +214,52 @@ export class IncomeVouchersService {
         ...(dto.incomeSource !== undefined && { incomeSource: dto.incomeSource }),
         ...(dto.description !== undefined && { description: dto.description }),
         ...(dto.reference !== undefined && { reference: dto.reference }),
+        ...(requestingUser.role === Role.OPERATOR && { status: VoucherStatus.PENDING }),
       },
+      select: incomeVoucherSelect,
+    });
+
+    return { voucher: serializeAmount(voucher) };
+  }
+
+  // ADMIN-only at the controller/guard level.
+  async approve(id: string) {
+    const existing = await this.findVoucherOrThrow(id);
+
+    if (existing.status !== VoucherStatus.PENDING) {
+      throw new BadRequestException({
+        message: 'Only a pending voucher can be approved',
+        errorCode: ErrorCode.VOUCHER_ALREADY_PROCESSED,
+      });
+    }
+
+    const voucher = await this.prisma.incomeVoucher.update({
+      where: { id },
+      data: { status: VoucherStatus.APPROVED },
+      select: incomeVoucherSelect,
+    });
+
+    return { voucher: serializeAmount(voucher) };
+  }
+
+  // ADMIN-only at the controller/guard level. Soft — sets status to
+  // REJECTED rather than deleting, so the Operator can see why their
+  // submission wasn't accepted and edit-resubmit it (update() above
+  // resets REJECTED back to PENDING on any Operator edit) instead of
+  // re-typing the whole voucher from scratch.
+  async reject(id: string) {
+    const existing = await this.findVoucherOrThrow(id);
+
+    if (existing.status !== VoucherStatus.PENDING) {
+      throw new BadRequestException({
+        message: 'Only a pending voucher can be rejected',
+        errorCode: ErrorCode.VOUCHER_ALREADY_PROCESSED,
+      });
+    }
+
+    const voucher = await this.prisma.incomeVoucher.update({
+      where: { id },
+      data: { status: VoucherStatus.REJECTED },
       select: incomeVoucherSelect,
     });
 
@@ -197,10 +274,15 @@ export class IncomeVouchersService {
   }
 
   async getStats(requestingUser: RequestingUser) {
-    const where: Prisma.IncomeVoucherWhereInput =
+    const baseWhere: Prisma.IncomeVoucherWhereInput =
       requestingUser.role === Role.OPERATOR
         ? { createdById: requestingUser.id }
         : {};
+
+    // Same reasoning as findAll()'s approvedAmountWhere — dashboard
+    // stats represent official finances, so only APPROVED vouchers
+    // count toward totalVouchers/totalAmount here too.
+    const where: Prisma.IncomeVoucherWhereInput = { ...baseWhere, status: VoucherStatus.APPROVED };
 
     const todayDate = getDhakaTodayDateOnly();
 
@@ -243,9 +325,6 @@ export class IncomeVouchersService {
       });
     }
 
-    // PDF content is always rendered in Bengali regardless of the
-    // requesting user's UI language — this is an official Bangladeshi
-    // financial document, not a UI element, so it stays fixed.
     const html = buildVoucherPdfHtml({
       voucherTypeLabel: 'আয়ের ভাউচার',
       accentColor: '#007A43',
@@ -283,7 +362,9 @@ export class IncomeVouchersService {
   ): Promise<Buffer> {
     const { search, dateFrom, dateTo, createdById } = query;
 
-    const where: Prisma.IncomeVoucherWhereInput = {};
+    const where: Prisma.IncomeVoucherWhereInput = {
+      status: VoucherStatus.APPROVED,
+    };
 
     if (requestingUser.role === Role.OPERATOR) {
       where.createdById = requestingUser.id;
@@ -332,10 +413,6 @@ export class IncomeVouchersService {
     return this.pdfService.generatePdfFromHtml(html);
   }
 
-  // Formats the applied date range for display on the summary PDF —
-  // deliberately never includes the raw search term (see SummaryPdfData
-  // comment: search is an exploratory UI filter, not a formal
-  // reporting criterion).
   private formatDateRangeLabel(dateFrom?: string, dateTo?: string): string | undefined {
     if (!dateFrom && !dateTo) return undefined;
 
@@ -352,9 +429,6 @@ export class IncomeVouchersService {
     return `${fmt(dateTo as string)} পর্যন্ত`;
   }
 
-  // Shared by findOne/update/remove — fetches the full record (with
-  // createdBy, needed by findOne's ownership check) or throws a
-  // consistent NotFoundException.
   private async findVoucherOrThrow(id: string): Promise<IncomeVoucherWithCreatedBy> {
     const voucher = await this.prisma.incomeVoucher.findUnique({
       where: { id },

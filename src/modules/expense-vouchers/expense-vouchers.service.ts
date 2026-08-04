@@ -1,11 +1,11 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from 'src/infrastructure/prisma/prisma.service';
 import { CreateExpenseVoucherDto } from './dto/create-expense-voucher.dto';
 import { UpdateExpenseVoucherDto } from './dto/update-expense-voucher.dto';
 import { GetExpenseVouchersDto } from './dto/get-expense-vouchers.dto';
 import { GetExpenseVoucherSummaryDto } from './dto/get-expense-voucher-summary.dto';
 import { Prisma } from 'src/generated/prisma/client';
-import { Role, VoucherType } from 'src/generated/prisma/enums';
+import { Role, VoucherType, VoucherStatus } from 'src/generated/prisma/enums';
 import { ErrorCode } from 'src/common/constants/error-codes';
 import { getDhakaTodayDateOnly } from 'src/common/utils/date-range.util';
 import { serializeAmount } from 'src/common/utils/serialize-decimal.util';
@@ -16,6 +16,8 @@ import { buildVoucherPdfHtml } from 'src/infrastructure/pdf/templates/voucher-pd
 import { buildSummaryPdfHtml } from 'src/infrastructure/pdf/templates/summary-pdf.template';
 import { LOGO_DATA_URI } from 'src/infrastructure/pdf/assets/logo';
 
+const EXPENSE_ACCENT_COLOR = '#007A43';
+
 const expenseVoucherSelect = {
   id: true,
   voucherNumber: true,
@@ -24,6 +26,7 @@ const expenseVoucherSelect = {
   expenseHead: true,
   description: true,
   reference: true,
+  status: true,
   createdAt: true,
   updatedAt: true,
   createdBy: {
@@ -37,11 +40,6 @@ type ExpenseVoucherWithCreatedBy = Prisma.ExpenseVoucherGetPayload<{
 
 type RequestingUser = { id: string; role: Role };
 
-// Same green accent color used by Income Voucher's PDF (sampled from
-// the national seal logo) — both voucher types share this color in
-// their PDF documents.
-const EXPENSE_ACCENT_COLOR = '#007A43';
-
 @Injectable()
 export class ExpenseVouchersService {
   constructor(
@@ -49,16 +47,16 @@ export class ExpenseVouchersService {
     private readonly pdfService: PdfService,
   ) {}
 
-  async create(dto: CreateExpenseVoucherDto, userId: string) {
+  async create(dto: CreateExpenseVoucherDto, requestingUser: RequestingUser) {
     assertVoucherDateNotFuture(dto.date);
 
-    // Since `date` is a @db.Date column (no time/timezone component),
-    // new Date(dto.date) maps unambiguously onto it — no Dhaka-offset
-    // math needed.
     const voucherDate = new Date(dto.date);
 
+    const initialStatus =
+      requestingUser.role === Role.ADMIN ? VoucherStatus.APPROVED : VoucherStatus.PENDING;
+
     const voucher = await this.prisma.$transaction(async (tx) => {
-      const voucherNumber = await generateVoucherNumber(tx, voucherDate, VoucherType.EXP);
+      const voucherNumber = await generateVoucherNumber(tx, voucherDate, VoucherType.EXVO);
 
       return tx.expenseVoucher.create({
         data: {
@@ -68,7 +66,8 @@ export class ExpenseVouchersService {
           expenseHead: dto.expenseHead,
           description: dto.description,
           reference: dto.reference,
-          createdById: userId,
+          status: initialStatus,
+          createdById: requestingUser.id,
         },
         select: expenseVoucherSelect,
       });
@@ -78,7 +77,7 @@ export class ExpenseVouchersService {
   }
 
   async findAll(query: GetExpenseVouchersDto, requestingUser: RequestingUser) {
-    const { page, limit, search, dateFrom, dateTo, createdById } = query;
+    const { page, limit, search, dateFrom, dateTo, createdById, status } = query;
 
     const where: Prisma.ExpenseVoucherWhereInput = {};
 
@@ -86,6 +85,10 @@ export class ExpenseVouchersService {
       where.createdById = requestingUser.id;
     } else if (createdById) {
       where.createdById = createdById;
+    }
+
+    if (status) {
+      where.status = status;
     }
 
     if (search) {
@@ -105,7 +108,9 @@ export class ExpenseVouchersService {
 
     const skip = (page - 1) * limit;
 
-    const [vouchers, aggregateResult] = await this.prisma.$transaction([
+    const approvedAmountWhere: Prisma.ExpenseVoucherWhereInput = { ...where, status: VoucherStatus.APPROVED };
+
+    const [vouchers, countResult, approvedSumResult] = await this.prisma.$transaction([
       this.prisma.expenseVoucher.findMany({
         where,
         skip,
@@ -113,25 +118,35 @@ export class ExpenseVouchersService {
         orderBy: [{ date: 'desc' }, { voucherNumber: 'desc' }],
         select: expenseVoucherSelect,
       }),
+      this.prisma.expenseVoucher.count({ where }),
       this.prisma.expenseVoucher.aggregate({
-        where,
-        _count: true,
+        where: approvedAmountWhere,
         _sum: { amount: true },
       }),
     ]);
-
-    const total = aggregateResult._count;
 
     return {
       vouchers: vouchers.map((v) => serializeAmount(v)),
       meta: {
         page,
         limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        totalAmount: Number(aggregateResult._sum.amount ?? 0),
+        total: countResult,
+        totalPages: Math.ceil(countResult / limit),
+        totalAmount: Number(approvedSumResult._sum.amount ?? 0),
       },
     };
+  }
+
+  async getPendingCount(requestingUser: RequestingUser) {
+    if (requestingUser.role !== Role.ADMIN) {
+      return { count: 0 };
+    }
+
+    const count = await this.prisma.expenseVoucher.count({
+      where: { status: VoucherStatus.PENDING },
+    });
+
+    return { count };
   }
 
   async findOne(id: string, requestingUser: RequestingUser) {
@@ -150,9 +165,23 @@ export class ExpenseVouchersService {
     return { voucher: serializeAmount(voucher) };
   }
 
-  // ADMIN-only at the controller/guard level.
-  async update(id: string, dto: UpdateExpenseVoucherDto) {
-    await this.findVoucherOrThrow(id);
+  async update(id: string, dto: UpdateExpenseVoucherDto, requestingUser: RequestingUser) {
+    const existing = await this.findVoucherOrThrow(id);
+
+    if (requestingUser.role === Role.OPERATOR) {
+      if (existing.createdBy.id !== requestingUser.id) {
+        throw new ForbiddenException({
+          message: 'You do not have access to this voucher',
+          errorCode: ErrorCode.FORBIDDEN,
+        });
+      }
+      if (existing.status === VoucherStatus.APPROVED) {
+        throw new ForbiddenException({
+          message: 'An approved voucher cannot be edited',
+          errorCode: ErrorCode.VOUCHER_LOCKED,
+        });
+      }
+    }
 
     if (dto.date !== undefined) {
       assertVoucherDateNotFuture(dto.date);
@@ -166,6 +195,7 @@ export class ExpenseVouchersService {
         ...(dto.expenseHead !== undefined && { expenseHead: dto.expenseHead }),
         ...(dto.description !== undefined && { description: dto.description }),
         ...(dto.reference !== undefined && { reference: dto.reference }),
+        ...(requestingUser.role === Role.OPERATOR && { status: VoucherStatus.PENDING }),
       },
       select: expenseVoucherSelect,
     });
@@ -173,7 +203,44 @@ export class ExpenseVouchersService {
     return { voucher: serializeAmount(voucher) };
   }
 
-  // ADMIN-only at the controller/guard level.
+  async approve(id: string) {
+    const existing = await this.findVoucherOrThrow(id);
+
+    if (existing.status !== VoucherStatus.PENDING) {
+      throw new BadRequestException({
+        message: 'Only a pending voucher can be approved',
+        errorCode: ErrorCode.VOUCHER_ALREADY_PROCESSED,
+      });
+    }
+
+    const voucher = await this.prisma.expenseVoucher.update({
+      where: { id },
+      data: { status: VoucherStatus.APPROVED },
+      select: expenseVoucherSelect,
+    });
+
+    return { voucher: serializeAmount(voucher) };
+  }
+
+  async reject(id: string) {
+    const existing = await this.findVoucherOrThrow(id);
+
+    if (existing.status !== VoucherStatus.PENDING) {
+      throw new BadRequestException({
+        message: 'Only a pending voucher can be rejected',
+        errorCode: ErrorCode.VOUCHER_ALREADY_PROCESSED,
+      });
+    }
+
+    const voucher = await this.prisma.expenseVoucher.update({
+      where: { id },
+      data: { status: VoucherStatus.REJECTED },
+      select: expenseVoucherSelect,
+    });
+
+    return { voucher: serializeAmount(voucher) };
+  }
+
   async remove(id: string) {
     await this.findVoucherOrThrow(id);
     await this.prisma.expenseVoucher.delete({ where: { id } });
@@ -181,10 +248,12 @@ export class ExpenseVouchersService {
   }
 
   async getStats(requestingUser: RequestingUser) {
-    const where: Prisma.ExpenseVoucherWhereInput =
+    const baseWhere: Prisma.ExpenseVoucherWhereInput =
       requestingUser.role === Role.OPERATOR
         ? { createdById: requestingUser.id }
         : {};
+
+    const where: Prisma.ExpenseVoucherWhereInput = { ...baseWhere, status: VoucherStatus.APPROVED };
 
     const todayDate = getDhakaTodayDateOnly();
 
@@ -264,7 +333,9 @@ export class ExpenseVouchersService {
   ): Promise<Buffer> {
     const { search, dateFrom, dateTo, createdById } = query;
 
-    const where: Prisma.ExpenseVoucherWhereInput = {};
+    const where: Prisma.ExpenseVoucherWhereInput = {
+      status: VoucherStatus.APPROVED,
+    };
 
     if (requestingUser.role === Role.OPERATOR) {
       where.createdById = requestingUser.id;

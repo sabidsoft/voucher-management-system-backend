@@ -87,10 +87,20 @@ export function getSharedPdfStyles(accentColor: string): string {
     font-weight: 800;
     color: #232220;
   }
+  .signature-wrapper {
+    /* Non-flex wrapper carrying the break-avoidance rule — Chromium's
+       print/PDF engine unreliably respects page-break-inside/
+       break-inside on flex containers directly, but does respect it
+       on a plain block-level ancestor. */
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
   .signature-block {
     margin-top: 70px;
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    page-break-inside: avoid;
+    break-inside: avoid;
   }
   .signature-content {
     text-align: center;
@@ -98,6 +108,14 @@ export function getSharedPdfStyles(accentColor: string): string {
   }
   .signature-space {
     height: 40px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .signature-img {
+    max-width: 150px;
+    max-height: 38px;
+    object-fit: contain;
   }
   .signature-line {
     border-top: 1.5px solid #232220;

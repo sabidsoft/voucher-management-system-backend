@@ -9,13 +9,28 @@ interface VoucherPdfData {
   categoryLabel: string; // "আয়ের উৎস" | "ব্যয়ের খাত"
   categoryValue: string;
   description: string;
-  reference: string;
+  // Formatted date+time (e.g. "০৫ আগস্ট ২০২৬, ১০:৩২ AM") — when the
+  // voucher record was actually created, distinct from `date` above
+  // (the business/voucher date, user-entered, no time component).
+  createdAt: string;
   operatorName: string;
   officeName: string;
   constituencyLabel: string;
   signatoryName: string;
   signatoryTitle: string;
   signatoryOrganization: string;
+  // Same optional-data-URI pattern as logoDataUri below — kept
+  // optional so the signature-space still renders (blank, for a
+  // physical pen-signature) if no image is provided.
+  signatureDataUri?: string;
+  // Second signatory (the MP) — sits on the RIGHT side of the
+  // signature-block, deliberately with NO signatureDataUri: this is
+  // signed by hand, not pre-filled. Reuses constituencyLabel above
+  // rather than duplicating it, since both signatories share the same
+  // constituency.
+  secondarySignatoryName: string;
+  secondarySignatoryTitle: string;
+  secondarySignatoryOrganization: string;
   // A complete data URI (e.g. "data:image/webp;base64,...."), already
   // encoded by the caller — kept optional so the header still renders
   // cleanly if no logo file exists yet.
@@ -64,12 +79,12 @@ ${PDF_HEAD_FONTS}
       <td class="value-cell">${escapeHtml(data.description)}</td>
     </tr>
     <tr>
-      <td class="label-cell">রেফারেন্স</td>
-      <td class="value-cell">${escapeHtml(data.reference)}</td>
+      <td class="label-cell">এন্ট্রি করেছেন</td>
+      <td class="value-cell">${escapeHtml(data.operatorName)}</td>
     </tr>
     <tr>
-      <td class="label-cell">অপারেটর</td>
-      <td class="value-cell">${escapeHtml(data.operatorName)}</td>
+      <td class="label-cell">এন্ট্রি করার সময়</td>
+      <td class="value-cell">${escapeHtml(data.createdAt)}</td>
     </tr>
     <tr class="amount-row">
       <td class="label-cell">পরিমাণ (টাকা)</td>
@@ -77,9 +92,12 @@ ${PDF_HEAD_FONTS}
     </tr>
   </table>
 
+  <div class="signature-wrapper">
   <div class="signature-block">
     <div class="signature-content">
-      <div class="signature-space"></div>
+      <div class="signature-space">
+        ${data.signatureDataUri ? `<img class="signature-img" src="${data.signatureDataUri}" alt="Signature" />` : ""}
+      </div>
       <div class="signature-line">
         <div class="signature-name">${escapeHtml(data.signatoryName)}</div>
         <div class="signature-detail">${escapeHtml(data.signatoryTitle)}</div>
@@ -87,6 +105,16 @@ ${PDF_HEAD_FONTS}
         <div class="signature-detail">${escapeHtml(data.signatoryOrganization)}</div>
       </div>
     </div>
+    <div class="signature-content">
+      <div class="signature-space"></div>
+      <div class="signature-line">
+        <div class="signature-name">${escapeHtml(data.secondarySignatoryName)}</div>
+        <div class="signature-detail">${escapeHtml(data.secondarySignatoryTitle)}</div>
+        <div class="signature-detail">${escapeHtml(data.constituencyLabel)}</div>
+        <div class="signature-detail">${escapeHtml(data.secondarySignatoryOrganization)}</div>
+      </div>
+    </div>
+  </div>
   </div>
 </body>
 </html>

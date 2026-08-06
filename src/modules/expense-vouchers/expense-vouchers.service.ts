@@ -15,6 +15,7 @@ import { PdfService } from 'src/infrastructure/pdf/pdf.service';
 import { buildVoucherPdfHtml } from 'src/infrastructure/pdf/templates/voucher-pdf.template';
 import { buildSummaryPdfHtml } from 'src/infrastructure/pdf/templates/summary-pdf.template';
 import { LOGO_DATA_URI } from 'src/infrastructure/pdf/assets/logo';
+import { SIGNATURE_DATA_URI } from 'src/infrastructure/pdf/assets/signature';
 
 const EXPENSE_ACCENT_COLOR = '#007A43';
 
@@ -313,14 +314,24 @@ export class ExpenseVouchersService {
       categoryLabel: 'ব্যয়ের খাত',
       categoryValue: voucher.expenseHead,
       description: voucher.description,
-      reference: voucher.reference,
+      createdAt: voucher.createdAt.toLocaleString('bn-BD', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
       operatorName: voucher.createdBy.name,
       officeName: 'মাননীয় সংসদ সদস্য-এর কার্যালয়',
       constituencyLabel: '১৭ লালমনিরহাট-২',
       signatoryName: 'আহমেদ কবির আদনান',
       signatoryTitle: 'মাননীয় সংসদ সদস্য-এর ব্যক্তিগত সহকারী',
       signatoryOrganization: 'বাংলাদেশ জাতীয় সংসদ সচিবালয়',
+      secondarySignatoryName: 'মো: রোকন উদ্দীন বাবুল এম.পি',
+      secondarySignatoryTitle: 'সংসদ সদস্য',
+      secondarySignatoryOrganization: 'ত্রয়োদশ জাতীয় সংসদ',
       logoDataUri: LOGO_DATA_URI,
+      signatureDataUri: SIGNATURE_DATA_URI,
     });
 
     const buffer = await this.pdfService.generatePdfFromHtml(html);
@@ -358,16 +369,36 @@ export class ExpenseVouchersService {
       };
     }
 
-    const aggregateResult = await this.prisma.expenseVoucher.aggregate({
-      where,
-      _count: true,
-      _sum: { amount: true },
-    });
+    const [aggregateResult, vouchers] = await this.prisma.$transaction([
+      this.prisma.expenseVoucher.aggregate({
+        where,
+        _count: true,
+        _sum: { amount: true },
+      }),
+      this.prisma.expenseVoucher.findMany({
+        where,
+        orderBy: [{ date: 'desc' }, { voucherNumber: 'desc' }],
+        select: { voucherNumber: true, date: true, amount: true },
+      }),
+    ]);
 
     const html = buildSummaryPdfHtml({
       voucherTypeLabel: 'ব্যয়ের ভাউচারের সারসংক্ষেপ',
       accentColor: EXPENSE_ACCENT_COLOR,
       totalVouchers: aggregateResult._count,
+      vouchers: vouchers.map((v) => ({
+        voucherNumber: v.voucherNumber,
+        date: v.date.toLocaleDateString('bn-BD', {
+          day: '2-digit',
+          month: 'long',
+          year: 'numeric',
+          timeZone: 'UTC',
+        }),
+        amount: Number(v.amount).toLocaleString('bn-BD', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }),
+      })),
       totalAmount: Number(aggregateResult._sum.amount ?? 0).toLocaleString('bn-BD', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
@@ -378,7 +409,11 @@ export class ExpenseVouchersService {
       signatoryName: 'আহমেদ কবির আদনান',
       signatoryTitle: 'মাননীয় সংসদ সদস্য-এর ব্যক্তিগত সহকারী',
       signatoryOrganization: 'বাংলাদেশ জাতীয় সংসদ সচিবালয়',
+      secondarySignatoryName: 'মো: রোকন উদ্দীন বাবুল এম.পি',
+      secondarySignatoryTitle: 'সংসদ সদস্য',
+      secondarySignatoryOrganization: 'ত্রয়োদশ জাতীয় সংসদ',
       logoDataUri: LOGO_DATA_URI,
+      signatureDataUri: SIGNATURE_DATA_URI,
     });
 
     return this.pdfService.generatePdfFromHtml(html);
